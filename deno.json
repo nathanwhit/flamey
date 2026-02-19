@@ -1,0 +1,12 @@
+{
+  "name": "@flamey/cli",
+  "version": "0.1.0",
+  "exports": "./src/main.ts",
+  "tasks": {
+    "dev": "deno run -A src/main.ts",
+    "install": "deno install -A -n flamey src/main.ts"
+  },
+  "compilerOptions": {
+    "strict": true
+  }
+}
