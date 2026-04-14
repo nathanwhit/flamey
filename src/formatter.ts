@@ -1,5 +1,5 @@
 import type { AggregationResult, CallTreeNode } from "./parser.ts";
-import type { Thread } from "./types.ts";
+import type { ThreadInfo } from "./types.ts";
 
 export interface FormatOptions {
   topFunctions?: number;
@@ -19,8 +19,8 @@ const DEFAULT_OPTIONS: Required<FormatOptions> = {
 
 export function formatResult(
   result: AggregationResult,
-  thread: Thread,
-  options: FormatOptions = {}
+  thread: ThreadInfo,
+  options: FormatOptions = {},
 ): string {
   const opts = { ...DEFAULT_OPTIONS, ...options };
 
@@ -42,7 +42,7 @@ export function formatResult(
 
   // Summary
   lines.push(
-    `Total samples: ${result.totalSamples} | Total time: ~${result.totalTime}ms`
+    `Total samples: ${result.totalSamples} | Total time: ~${result.totalTime}ms`,
   );
   lines.push("");
 
@@ -51,14 +51,16 @@ export function formatResult(
     lines.push("### Top Functions by Self Time");
     lines.push("");
     lines.push(
-      "| Rank | Self% | Total% | Self Time | Function |"
+      "| Rank | Self% | Total% | Self Time | Function |",
     );
     lines.push("|------|-------|--------|-----------|----------|");
   } else {
     lines.push("TOP FUNCTIONS BY SELF TIME:");
     lines.push("-".repeat(80));
     lines.push(
-      `${"Rank".padEnd(6)}${"Self%".padEnd(8)}${"Total%".padEnd(9)}${"Self Time".padEnd(12)}Function`
+      `${"Rank".padEnd(6)}${"Self%".padEnd(8)}${"Total%".padEnd(9)}${
+        "Self Time".padEnd(12)
+      }Function`,
     );
     lines.push("-".repeat(80));
   }
@@ -75,10 +77,14 @@ export function formatResult(
     const name = truncateName(f.name, 120);
 
     if (isMarkdown) {
-      lines.push(`| ${rank} | ${selfPct} | ${totalPct} | ${selfTime} | \`${name}\` |`);
+      lines.push(
+        `| ${rank} | ${selfPct} | ${totalPct} | ${selfTime} | \`${name}\` |`,
+      );
     } else {
       lines.push(
-        `${rank.padEnd(6)}${selfPct.padEnd(8)}${totalPct.padEnd(9)}${selfTime.padEnd(12)}${name}`
+        `${rank.padEnd(6)}${selfPct.padEnd(8)}${totalPct.padEnd(9)}${
+          selfTime.padEnd(12)
+        }${name}`,
       );
     }
   }
@@ -94,7 +100,13 @@ export function formatResult(
     lines.push("-".repeat(80));
   }
 
-  formatCallTreeNode(result.callTree, lines, 0, opts.maxTreeDepth, opts.minPercent);
+  formatCallTreeNode(
+    result.callTree,
+    lines,
+    0,
+    opts.maxTreeDepth,
+    opts.minPercent,
+  );
 
   if (isMarkdown) {
     lines.push("```");
@@ -146,23 +158,24 @@ function formatCallTreeNode(
   lines: string[],
   depth: number,
   maxDepth: number,
-  minPercent: number
+  minPercent: number,
 ): void {
   if (depth > maxDepth) return;
   if (node.totalPercent < minPercent && depth > 0) return;
 
   const indent = "  ".repeat(depth);
-  const selfInfo =
-    node.selfPercent > 0.5 ? ` [self: ${node.selfPercent.toFixed(1)}%]` : "";
+  const selfInfo = node.selfPercent > 0.5
+    ? ` [self: ${node.selfPercent.toFixed(1)}%]`
+    : "";
   const name = truncateName(node.name, 120);
 
   lines.push(
-    `${indent}${node.totalPercent.toFixed(1)}% ${name}${selfInfo}`
+    `${indent}${node.totalPercent.toFixed(1)}% ${name}${selfInfo}`,
   );
 
   // Only show children that meet the threshold
   const significantChildren = node.children.filter(
-    (c) => c.totalPercent >= minPercent
+    (c) => c.totalPercent >= minPercent,
   );
 
   for (const child of significantChildren) {
@@ -172,8 +185,8 @@ function formatCallTreeNode(
 
 function formatJson(
   result: AggregationResult,
-  thread: Thread,
-  opts: Required<FormatOptions>
+  thread: ThreadInfo,
+  opts: Required<FormatOptions>,
 ): string {
   const output = {
     thread: {
@@ -215,8 +228,8 @@ function round(n: number, decimals: number): number {
 
 export function formatAllResults(
   results: AggregationResult[],
-  threads: Thread[],
-  options: FormatOptions = {}
+  threads: ThreadInfo[],
+  options: FormatOptions = {},
 ): string {
   const outputs: string[] = [];
 

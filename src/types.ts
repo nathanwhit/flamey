@@ -135,6 +135,14 @@ export interface SymbolEntry {
   symbol: number; // index into string_table
 }
 
+// Minimal thread descriptor used by formatter (works for both real and merged threads)
+export interface ThreadInfo {
+  name: string;
+  processName: string;
+  pid: number;
+  tid: number;
+}
+
 // Aggregated output types
 export interface AggregatedFunction {
   name: string;

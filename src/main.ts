@@ -1,8 +1,14 @@
 #!/usr/bin/env -S deno run -A
 
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
-import { loadProfile, aggregateProfile } from "./parser.ts";
+import {
+  aggregateProfile,
+  buildSymbolLookup,
+  loadProfile,
+  mergeThreads,
+} from "./parser.ts";
 import { formatAllResults, type FormatOptions } from "./formatter.ts";
+import type { ThreadInfo } from "./types.ts";
 
 const VERSION = "0.1.0";
 
@@ -32,6 +38,8 @@ OPTIONS:
   -t, --thread <pattern>  Only show threads with name matching pattern
   --exclude-thread <pat>  Exclude threads with name matching pattern
   --min-samples <n>       Only show threads with at least N samples (default: 5)
+  --merge-threads         Merge same-named threads into a single combined profile
+  --max-threads <n>       Max threads to show per unique thread name (busiest first)
 
 EXAMPLES:
   # Profile a command and output to terminal
@@ -49,6 +57,10 @@ EXAMPLES:
   # Filter to specific threads
   flamey --thread main --load profile.json
   flamey --exclude-thread worker --min-samples 100 --load profile.json
+
+  # Handle large thread pools (e.g. tokio workers)
+  flamey --merge-threads --load profile.json
+  flamey --max-threads 5 --load profile.json
 
 SIGNAL HANDLING:
   Press Ctrl+C once to stop recording and process the profile.
@@ -73,7 +85,7 @@ async function recordProfile(
     duration?: number;
     mainThreadOnly?: boolean;
     forwardSigint?: boolean;
-  }
+  },
 ): Promise<string> {
   // Create temp file for profile output
   const tempDir = await Deno.makeTempDir({ prefix: "flamey-" });
@@ -175,7 +187,7 @@ async function recordProfile(
     if (receivedSigint) {
       throw new Error(
         "Profile was not written. samply may not have had enough samples, " +
-        "or the process exited too quickly after Ctrl+C."
+          "or the process exited too quickly after Ctrl+C.",
       );
     }
     throw new Error(`Profile was not written to ${profilePath}`);
@@ -186,7 +198,13 @@ async function recordProfile(
 
 async function main() {
   const args = parseArgs(Deno.args, {
-    boolean: ["help", "version", "main-thread-only", "forward-sigint"],
+    boolean: [
+      "help",
+      "version",
+      "main-thread-only",
+      "forward-sigint",
+      "merge-threads",
+    ],
     string: ["output", "format", "load", "thread", "exclude-thread"],
     collect: ["thread", "exclude-thread"],
     alias: {
@@ -268,41 +286,102 @@ async function main() {
   const minSamples = (args["min-samples"] as number) ?? 5;
   const threadPatterns = (args.thread as string[]) ?? [];
   const excludePatterns = (args["exclude-thread"] as string[]) ?? [];
+  const shouldMerge = args["merge-threads"] as boolean;
+  const maxThreads = args["max-threads"] as number | undefined;
 
-  const filteredThreads = parsed.profile.threads.filter((t) => {
-    // Must have minimum samples
-    if (t.samples.length < minSamples) return false;
+  // Threads with samples, in order matching results[]
+  const threadsWithSamples = parsed.profile.threads.filter((t) =>
+    t.samples.length > 0
+  );
 
-    // If thread patterns specified, must match at least one
-    // Match thread name only (not process name) since threads in same process share process name
+  const filteredPairs: {
+    thread: typeof threadsWithSamples[0];
+    result: typeof results[0];
+  }[] = [];
+  for (let i = 0; i < threadsWithSamples.length; i++) {
+    const t = threadsWithSamples[i];
+
+    if (t.samples.length < minSamples) continue;
+
     if (threadPatterns.length > 0) {
       const matches = threadPatterns.some((p) => t.name.includes(p));
-      if (!matches) return false;
+      if (!matches) continue;
     }
 
-    // Must not match any exclude patterns
     if (excludePatterns.length > 0) {
       const excluded = excludePatterns.some((p) => t.name.includes(p));
-      if (excluded) return false;
+      if (excluded) continue;
     }
 
-    return true;
-  });
+    filteredPairs.push({ thread: t, result: results[i] });
+  }
 
-  // Filter results to match the filtered threads
-  const filteredResults = results.filter((_, i) => {
-    const thread = parsed.profile.threads.filter((t) => t.samples.length > 0)[i];
-    return filteredThreads.includes(thread);
-  });
-
-  if (filteredThreads.length === 0) {
+  if (filteredPairs.length === 0) {
     console.error("No threads matched the filter criteria.");
     console.error(`Total threads: ${parsed.profile.threads.length}`);
-    console.error(`Threads with samples: ${parsed.profile.threads.filter(t => t.samples.length > 0).length}`);
+    console.error(`Threads with samples: ${threadsWithSamples.length}`);
     Deno.exit(1);
   }
 
-  const output = formatAllResults(filteredResults, filteredThreads, formatOptions);
+  // Group by thread name for merge/limit operations
+  const groupsByName = new Map<string, typeof filteredPairs>();
+  for (const pair of filteredPairs) {
+    const name = pair.thread.name;
+    const group = groupsByName.get(name);
+    if (group) {
+      group.push(pair);
+    } else {
+      groupsByName.set(name, [pair]);
+    }
+  }
+
+  // Build final output arrays
+  const finalThreadInfos: ThreadInfo[] = [];
+  const finalResults: typeof results = [];
+
+  const symbolLookup = parsed.symbols
+    ? buildSymbolLookup(parsed.symbols, parsed.profile.libs)
+    : new Map();
+
+  for (const [name, group] of groupsByName) {
+    if (shouldMerge && group.length > 1) {
+      // Merge all threads in this group into one combined result
+      const threads = group.map((p) => p.thread);
+      const merged = mergeThreads(threads, symbolLookup, parsed.profile.libs);
+      const first = group[0].thread;
+      finalThreadInfos.push({
+        name: `${name} (${group.length} threads merged)`,
+        processName: first.processName,
+        pid: first.pid,
+        tid: first.tid,
+      });
+      finalResults.push(merged);
+    } else if (maxThreads !== undefined && group.length > maxThreads) {
+      // Sort by sample count descending, keep top N
+      group.sort((a, b) => b.thread.samples.length - a.thread.samples.length);
+      const kept = group.slice(0, maxThreads);
+      const dropped = group.length - maxThreads;
+      console.error(
+        `Showing ${maxThreads} of ${group.length} '${name}' threads (busiest first, ${dropped} omitted — use --merge-threads to combine)`,
+      );
+      for (const pair of kept) {
+        finalThreadInfos.push(pair.thread);
+        finalResults.push(pair.result);
+      }
+    } else {
+      // Pass through unchanged
+      for (const pair of group) {
+        finalThreadInfos.push(pair.thread);
+        finalResults.push(pair.result);
+      }
+    }
+  }
+
+  const output = formatAllResults(
+    finalResults,
+    finalThreadInfos,
+    formatOptions,
+  );
 
   // Write output
   if (args.output) {

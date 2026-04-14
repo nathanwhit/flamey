@@ -1,9 +1,10 @@
 import type {
+  AggregatedFunction,
+  CallTreeNode,
   Profile,
   SymbolsFile,
   Thread,
-  AggregatedFunction,
-  CallTreeNode,
+  ThreadInfo,
 } from "./types.ts";
 
 export type { CallTreeNode } from "./types.ts";
@@ -31,9 +32,9 @@ export async function loadProfile(profilePath: string): Promise<ParsedProfile> {
 }
 
 // Build a lookup from address to symbol name using symbols file
-function buildSymbolLookup(
+export function buildSymbolLookup(
   symbols: SymbolsFile,
-  _libs: Profile["libs"]
+  _libs: Profile["libs"],
 ): Map<string, Map<number, string>> {
   const lookup = new Map<string, Map<number, string>>();
 
@@ -62,7 +63,10 @@ function buildSymbolLookup(
       }
     }
 
-    lookup.set(libSyms.debug_id.toLowerCase().replace(/-/g, ""), addressToSymbol);
+    lookup.set(
+      libSyms.debug_id.toLowerCase().replace(/-/g, ""),
+      addressToSymbol,
+    );
   }
 
   return lookup;
@@ -79,7 +83,7 @@ interface SymbolContext {
 function getFuncName(
   thread: Thread,
   funcIdx: number,
-  ctx?: SymbolContext
+  ctx?: SymbolContext,
 ): string {
   const nameIdx = thread.funcTable.name[funcIdx];
   const name = thread.stringArray[nameIdx];
@@ -92,7 +96,10 @@ function getFuncName(
       if (libIdx !== null && libIdx < ctx.libs.length) {
         const lib = ctx.libs[libIdx];
         // breakpadId in profile has an extra "0" at the end
-        const debugId = lib.breakpadId.slice(0, -1).toLowerCase().replace(/-/g, "");
+        const debugId = lib.breakpadId.slice(0, -1).toLowerCase().replace(
+          /-/g,
+          "",
+        );
         const libSymbols = ctx.symbolLookup.get(debugId);
         if (libSymbols) {
           const addr = parseInt(name, 16);
@@ -112,7 +119,7 @@ function getFuncName(
 function walkStack(
   thread: Thread,
   stackIdx: number | null,
-  ctx?: SymbolContext
+  ctx?: SymbolContext,
 ): string[] {
   const frames: string[] = [];
   let currentStack = stackIdx;
@@ -136,29 +143,30 @@ export interface AggregationResult {
   hotPaths: string[][];
 }
 
-export function aggregateThread(
-  thread: Thread,
-  ctx?: SymbolContext
-): AggregationResult {
-  const samples = thread.samples;
-  const totalSamples = samples.length;
+// Collect resolved stack traces from a thread
+function collectStacks(thread: Thread, ctx?: SymbolContext): string[][] {
+  const allStacks: string[][] = [];
+  for (let i = 0; i < thread.samples.length; i++) {
+    const stackIdx = thread.samples.stack[i];
+    if (stackIdx === null || stackIdx === undefined) continue;
+    const stack = walkStack(thread, stackIdx, ctx);
+    if (stack.length > 0) allStacks.push(stack);
+  }
+  return allStacks;
+}
 
+// Aggregate pre-collected stacks into a result
+function aggregateStacks(
+  allStacks: string[][],
+  totalSamples: number,
+  interval: number,
+): AggregationResult {
   // Self time: time spent in this function (at top of stack)
   const selfCounts = new Map<string, number>();
   // Total time: time spent in this function or its callees
   const totalCounts = new Map<string, number>();
-  // Track all stacks for call tree building
-  const allStacks: string[][] = [];
 
-  for (let i = 0; i < totalSamples; i++) {
-    const stackIdx = samples.stack[i];
-    if (stackIdx === null || stackIdx === undefined) continue;
-
-    const stack = walkStack(thread, stackIdx, ctx);
-    if (stack.length === 0) continue;
-
-    allStacks.push(stack);
-
+  for (const stack of allStacks) {
     // Top of stack (leaf) gets self time
     const leaf = stack[0];
     selfCounts.set(leaf, (selfCounts.get(leaf) || 0) + 1);
@@ -173,8 +181,6 @@ export function aggregateThread(
     }
   }
 
-  // Calculate total time (assuming 1ms interval by default)
-  const interval = 1; // Could get from profile.meta.interval
   const totalTime = totalSamples * interval;
 
   // Build aggregated functions list
@@ -213,10 +219,20 @@ export function aggregateThread(
   };
 }
 
+export function aggregateThread(
+  thread: Thread,
+  ctx?: SymbolContext,
+): AggregationResult {
+  const allStacks = collectStacks(thread, ctx);
+  const totalSamples = thread.samples.length;
+  const interval = 1; // Could get from profile.meta.interval
+  return aggregateStacks(allStacks, totalSamples, interval);
+}
+
 function buildCallTree(
   stacks: string[][],
   totalSamples: number,
-  interval: number
+  interval: number,
 ): CallTreeNode {
   const root: CallTreeNode = {
     name: "[root]",
@@ -292,6 +308,30 @@ function findHotPaths(stacks: string[][], limit: number): string[][] {
   // Sort by count and take top N
   const sorted = [...pathCounts.values()].sort((a, b) => b.count - a.count);
   return sorted.slice(0, limit).map((p) => p.stack);
+}
+
+// Merge multiple threads into a single combined AggregationResult
+export function mergeThreads(
+  threads: Thread[],
+  symbolLookup: Map<string, Map<number, string>>,
+  libs: Profile["libs"],
+): AggregationResult {
+  let allStacks: string[][] = [];
+  let totalSamples = 0;
+
+  for (const thread of threads) {
+    const ctx: SymbolContext = {
+      symbolLookup,
+      libs,
+      resourceTable: thread.resourceTable,
+      stringArray: thread.stringArray,
+    };
+    const stacks = collectStacks(thread, ctx);
+    allStacks = allStacks.concat(stacks);
+    totalSamples += thread.samples.length;
+  }
+
+  return aggregateStacks(allStacks, totalSamples, 1);
 }
 
 export function aggregateProfile(parsed: ParsedProfile): AggregationResult[] {
