@@ -1,6 +1,6 @@
 #!/usr/bin/env -S deno run -A
 
-import { parseArgs } from "jsr:@std/cli@1/parse-args";
+import { parseArgs } from "@std/cli";
 import {
   aggregateProfile,
   buildSymbolLookup,

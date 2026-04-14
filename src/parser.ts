@@ -4,7 +4,6 @@ import type {
   Profile,
   SymbolsFile,
   Thread,
-  ThreadInfo,
 } from "./types.ts";
 
 export type { CallTreeNode } from "./types.ts";
