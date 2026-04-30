@@ -17,6 +17,24 @@ export async function loadProfile(profilePath: string): Promise<ParsedProfile> {
   const profileText = await Deno.readTextFile(profilePath);
   const profile: Profile = JSON.parse(profileText);
 
+  // Newer samply emits a top-level `shared` object holding tables that older
+  // versions stored per-thread. Inline them onto each thread so downstream
+  // code can stay agnostic.
+  // deno-lint-ignore no-explicit-any
+  const shared = (profile as any).shared;
+  if (shared) {
+    for (const thread of profile.threads) {
+      // deno-lint-ignore no-explicit-any
+      const t = thread as any;
+      t.stackTable ??= shared.stackTable;
+      t.frameTable ??= shared.frameTable;
+      t.funcTable ??= shared.funcTable;
+      t.resourceTable ??= shared.resourceTable;
+      t.nativeSymbols ??= shared.nativeSymbols;
+      t.stringArray ??= shared.stringArray;
+    }
+  }
+
   // Try to load symbols sidecar if it exists
   const symbolsPath = profilePath.replace(/\.json$/, ".syms.json");
   let symbols: SymbolsFile | undefined;

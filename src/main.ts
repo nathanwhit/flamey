@@ -78,6 +78,27 @@ OUTPUT FORMAT:
 `);
 }
 
+async function detectPresymbolicateFlag(): Promise<string | null> {
+  try {
+    const output = await new Deno.Command("samply", {
+      args: ["record", "--help"],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const help = new TextDecoder().decode(output.stdout) +
+      new TextDecoder().decode(output.stderr);
+    if (help.includes("--unstable-presymbolicate")) {
+      return "--unstable-presymbolicate";
+    }
+    if (help.includes("--presymbolicate")) {
+      return "--presymbolicate";
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function recordProfile(
   command: string[],
   options: {
@@ -91,14 +112,14 @@ async function recordProfile(
   const tempDir = await Deno.makeTempDir({ prefix: "flamey-" });
   const profilePath = `${tempDir}/profile.json`;
 
+  const presymbolicateFlag = await detectPresymbolicateFlag();
+
   // Build samply command
-  const samplyArgs = [
-    "record",
-    "--save-only",
-    "--unstable-presymbolicate",
-    "-o",
-    profilePath,
-  ];
+  const samplyArgs = ["record", "--save-only"];
+  if (presymbolicateFlag) {
+    samplyArgs.push(presymbolicateFlag);
+  }
+  samplyArgs.push("-o", profilePath);
 
   if (options.rate) {
     samplyArgs.push("--rate", options.rate.toString());
