@@ -74,7 +74,7 @@ export function formatResult(
     const selfPct = `${f.selfPercent.toFixed(1)}%`;
     const totalPct = `${f.totalPercent.toFixed(1)}%`;
     const selfTime = `${f.selfTime.toFixed(0)}ms`;
-    const name = truncateName(f.name, 120);
+    const name = cleanName(f.name, 120);
 
     if (isMarkdown) {
       lines.push(
@@ -123,8 +123,42 @@ export function formatResult(
       lines.push("-".repeat(80));
     }
 
-    for (let i = 0; i < Math.min(result.hotPaths.length, 10); i++) {
-      const path = result.hotPaths[i];
+    const displayPaths = result.hotPaths.slice(0, 10);
+
+    // Compute longest common root (suffix in leaf-to-root array). Print once
+    // if it's worth sharing, and strip it from each path below.
+    const commonRoot = displayPaths.length >= 2
+      ? longestCommonSuffix(displayPaths)
+      : [];
+    const stripCount = commonRoot.length >= 4 ? commonRoot.length : 0;
+
+    if (stripCount > 0) {
+      const collapsed = collapseRuns(commonRoot.map((f) => cleanName(f, 100)));
+      if (isMarkdown) {
+        lines.push(
+          `**Shared root** (last ${stripCount} frames in every path below; leaf-of-shared → root):`,
+        );
+        lines.push("```");
+      } else {
+        lines.push(
+          `Shared root (last ${stripCount} frames in every path below; leaf-of-shared → root):`,
+        );
+      }
+      for (let i = 0; i < collapsed.length; i++) {
+        const indent = "  ".repeat(i);
+        const { name, count } = collapsed[i];
+        const suffix = count > 1 ? ` (×${count})` : "";
+        lines.push(`${indent}← ${name}${suffix}`);
+      }
+      if (isMarkdown) lines.push("```");
+      lines.push("");
+    }
+
+    for (let i = 0; i < displayPaths.length; i++) {
+      const fullPath = displayPaths[i];
+      const path = stripCount > 0
+        ? fullPath.slice(0, fullPath.length - stripCount)
+        : fullPath;
       if (isMarkdown) {
         lines.push(`**Path ${i + 1}:**`);
         lines.push("```");
@@ -132,15 +166,20 @@ export function formatResult(
         lines.push(`Path ${i + 1}:`);
       }
 
-      // Show from leaf to root (caller)
-      for (let j = 0; j < path.length; j++) {
+      const collapsed = collapseRuns(path.map((f) => cleanName(f, 120)));
+      for (let j = 0; j < collapsed.length; j++) {
         const indent = "  ".repeat(j);
-        const name = truncateName(path[j], 150);
+        const { name, count } = collapsed[j];
+        const suffix = count > 1 ? ` (×${count})` : "";
         if (j === 0) {
-          lines.push(`${indent}→ ${name} (leaf/executing)`);
+          lines.push(`${indent}→ ${name}${suffix} (leaf/executing)`);
         } else {
-          lines.push(`${indent}← ${name}`);
+          lines.push(`${indent}← ${name}${suffix}`);
         }
+      }
+      if (stripCount > 0) {
+        const indent = "  ".repeat(collapsed.length);
+        lines.push(`${indent}← [+${stripCount} shared root frames]`);
       }
 
       if (isMarkdown) {
@@ -163,23 +202,55 @@ function formatCallTreeNode(
   if (depth > maxDepth) return;
   if (node.totalPercent < minPercent && depth > 0) return;
 
-  const indent = "  ".repeat(depth);
-  const selfInfo = node.selfPercent > 0.5
-    ? ` [self: ${node.selfPercent.toFixed(1)}%]`
-    : "";
-  const name = truncateName(node.name, 120);
+  // Walk down a chain of single-significant-child nodes whose totalPercent
+  // matches their parent (within rounding) and which have no self time worth
+  // showing. Collapse 3+ such frames to a single line.
+  const chain: CallTreeNode[] = [];
+  let cur: CallTreeNode = node;
+  while (true) {
+    chain.push(cur);
+    const sig = cur.children.filter((c) => c.totalPercent >= minPercent);
+    if (sig.length !== 1) break;
+    if (cur.selfPercent > 0.5) break;
+    const child = sig[0];
+    if (Math.abs(child.totalPercent - cur.totalPercent) > 0.5) break;
+    cur = child;
+    if (chain.length > 500) break;
+  }
 
-  lines.push(
-    `${indent}${node.totalPercent.toFixed(1)}% ${name}${selfInfo}`,
-  );
+  let nextDepth: number;
+  if (chain.length >= 4) {
+    const indent = "  ".repeat(depth);
+    const head = cleanName(chain[0].name, 60);
+    const tail = cleanName(chain[chain.length - 1].name, 60);
+    lines.push(
+      `${indent}${chain[0].totalPercent.toFixed(1)}% ${head} → … (×${
+        chain.length - 2
+      } same-%) → ${tail}`,
+    );
+    nextDepth = depth + 1;
+  } else {
+    for (let i = 0; i < chain.length; i++) {
+      const n = chain[i];
+      const ind = "  ".repeat(depth + i);
+      const selfInfo = n.selfPercent > 0.5
+        ? ` [self: ${n.selfPercent.toFixed(1)}%]`
+        : "";
+      lines.push(
+        `${ind}${n.totalPercent.toFixed(1)}% ${
+          cleanName(n.name, 100)
+        }${selfInfo}`,
+      );
+    }
+    nextDepth = depth + chain.length;
+  }
 
-  // Only show children that meet the threshold
-  const significantChildren = node.children.filter(
+  const last = chain[chain.length - 1];
+  const significantChildren = last.children.filter(
     (c) => c.totalPercent >= minPercent,
   );
-
   for (const child of significantChildren) {
-    formatCallTreeNode(child, lines, depth + 1, maxDepth, minPercent);
+    formatCallTreeNode(child, lines, nextDepth, maxDepth, minPercent);
   }
 }
 
@@ -215,10 +286,97 @@ function formatJson(
   return JSON.stringify(output, null, 2);
 }
 
-function truncateName(name: string, maxLen: number): string {
-  if (name.length <= maxLen) return name;
-  // Truncate from the beginning to keep the function name (which is at the end)
-  return "..." + name.slice(-(maxLen - 3));
+// Collapse a single bracket-balanced group (e.g. `<...>`, `(...)`) whose
+// contents are longer than `minContentLen` into `<…>` / `(…)`. We do this on
+// outer-most groups only — inner groups vanish along with their parent.
+// Skip collapsing `<...>` whose content contains ` as `, since that's Rust
+// UFCS (`<T as Trait>::method`) where the type/trait info is the meaningful
+// part of the name.
+function collapseGroups(
+  s: string,
+  open: string,
+  close: string,
+  minContentLen: number,
+): string {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] !== open) {
+      out += s[i];
+      i++;
+      continue;
+    }
+    let depth = 1;
+    let j = i + 1;
+    while (j < s.length && depth > 0) {
+      if (s[j] === open) depth++;
+      else if (s[j] === close) depth--;
+      if (depth > 0) j++;
+    }
+    if (depth !== 0) {
+      out += s[i];
+      i++;
+      continue;
+    }
+    const content = s.slice(i + 1, j);
+    if (
+      content.length >= minContentLen &&
+      !(open === "<" && content.includes(" as "))
+    ) {
+      out += open + "…" + close;
+    } else {
+      out += open + content + close;
+    }
+    i = j + 1;
+  }
+  return out;
+}
+
+// Run-length-encode adjacent identical strings.
+function collapseRuns(frames: string[]): { name: string; count: number }[] {
+  const out: { name: string; count: number }[] = [];
+  for (const f of frames) {
+    const last = out[out.length - 1];
+    if (last && last.name === f) {
+      last.count++;
+    } else {
+      out.push({ name: f, count: 1 });
+    }
+  }
+  return out;
+}
+
+// Frames are leaf-to-root, so the root is at the END of the array. Find the
+// longest sequence at the end shared across every path.
+function longestCommonSuffix(paths: string[][]): string[] {
+  if (paths.length === 0) return [];
+  const minLen = Math.min(...paths.map((p) => p.length));
+  const suffix: string[] = [];
+  for (let i = 1; i <= minLen; i++) {
+    const frame = paths[0][paths[0].length - i];
+    if (paths.every((p) => p[p.length - i] === frame)) {
+      suffix.unshift(frame);
+    } else {
+      break;
+    }
+  }
+  return suffix;
+}
+
+function cleanName(name: string, maxLen: number = 100): string {
+  // JS frames are already terse and contain useful file/line info — leave alone.
+  if (name.startsWith("JS:")) {
+    if (name.length <= maxLen) return name;
+    const head = Math.floor((maxLen - 1) / 2);
+    const tail = maxLen - 1 - head;
+    return name.slice(0, head) + "…" + name.slice(-tail);
+  }
+  let cleaned = collapseGroups(name, "<", ">", 24);
+  cleaned = collapseGroups(cleaned, "(", ")", 24);
+  if (cleaned.length <= maxLen) return cleaned;
+  const head = Math.floor((maxLen - 1) / 2);
+  const tail = maxLen - 1 - head;
+  return cleaned.slice(0, head) + "…" + cleaned.slice(-tail);
 }
 
 function round(n: number, decimals: number): number {
