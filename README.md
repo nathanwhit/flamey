@@ -20,6 +20,12 @@ Profile a command:
 flamey -- ./my-program arg1 arg2
 ```
 
+Attach to an already-running process:
+
+```sh
+flamey --pid 12345
+```
+
 Load an existing samply profile:
 
 ```sh

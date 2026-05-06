@@ -18,6 +18,7 @@ flamey v${VERSION} - LLM-friendly profiling output
 
 USAGE:
   flamey [OPTIONS] -- <COMMAND> [ARGS...]    Profile a command
+  flamey --pid <PID>                         Attach to an existing process
   flamey --load <profile.json>               Load existing profile
 
 OPTIONS:
@@ -31,6 +32,7 @@ OPTIONS:
   --rate <hz>             Sampling rate in Hz (default: 1000)
   --duration <sec>        Max recording duration in seconds
   --main-thread-only      Only profile main thread
+  -p, --pid <PID>         Attach to an existing process by PID
   --load <file>           Load existing profile.json instead of recording
   --forward-sigint        Forward SIGINT to samply (use when running as subprocess)
 
@@ -53,6 +55,10 @@ EXAMPLES:
 
   # Profile with custom settings
   flamey --rate 100 --duration 30 -- python script.py
+
+  # Attach to a running process
+  flamey --pid 12345
+  flamey -p 12345 --duration 10
 
   # Filter to specific threads
   flamey --thread main --load profile.json
@@ -100,7 +106,7 @@ async function detectPresymbolicateFlag(): Promise<string | null> {
 }
 
 async function recordProfile(
-  command: string[],
+  target: { command: string[] } | { pid: number },
   options: {
     rate?: number;
     duration?: number;
@@ -131,8 +137,12 @@ async function recordProfile(
     samplyArgs.push("--main-thread-only");
   }
 
-  samplyArgs.push("--");
-  samplyArgs.push(...command);
+  if ("pid" in target) {
+    samplyArgs.push("--pid", target.pid.toString());
+  } else {
+    samplyArgs.push("--");
+    samplyArgs.push(...target.command);
+  }
 
   console.error(`Recording profile: samply ${samplyArgs.join(" ")}`);
   console.error("(Press Ctrl+C to stop recording, twice to abort)");
@@ -226,7 +236,7 @@ async function main() {
       "forward-sigint",
       "merge-threads",
     ],
-    string: ["output", "format", "load", "thread", "exclude-thread"],
+    string: ["output", "format", "load", "thread", "exclude-thread", "pid"],
     collect: ["thread", "exclude-thread"],
     alias: {
       h: "help",
@@ -234,6 +244,7 @@ async function main() {
       o: "output",
       f: "format",
       t: "thread",
+      p: "pid",
     },
     default: {
       format: "text",
@@ -260,6 +271,19 @@ async function main() {
   if (args.load) {
     // Load existing profile
     profilePath = args.load;
+  } else if (args.pid) {
+    const pid = Number.parseInt(args.pid as string, 10);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      console.error(`Error: Invalid --pid value: ${args.pid}`);
+      Deno.exit(1);
+    }
+
+    profilePath = await recordProfile({ pid }, {
+      rate: args.rate as number | undefined,
+      duration: args.duration as number | undefined,
+      mainThreadOnly: args["main-thread-only"] as boolean | undefined,
+      forwardSigint: args["forward-sigint"] as boolean | undefined,
+    });
   } else if (args._.length > 0 || Deno.args.includes("--")) {
     // Get command after --
     const dashDashIndex = Deno.args.indexOf("--");
@@ -274,14 +298,16 @@ async function main() {
     }
 
     // Record profile
-    profilePath = await recordProfile(command, {
+    profilePath = await recordProfile({ command }, {
       rate: args.rate as number | undefined,
       duration: args.duration as number | undefined,
       mainThreadOnly: args["main-thread-only"] as boolean | undefined,
       forwardSigint: args["forward-sigint"] as boolean | undefined,
     });
   } else {
-    console.error("Error: Must specify either --load <file> or -- <command>");
+    console.error(
+      "Error: Must specify either --load <file>, --pid <pid>, or -- <command>",
+    );
     printHelp();
     Deno.exit(1);
   }
