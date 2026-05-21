@@ -160,16 +160,48 @@ export interface AggregationResult {
   hotPaths: string[][];
 }
 
+export interface AggregationOptions {
+  ignoreBeforeMs?: number;
+  profileStartTime?: number;
+}
+
+function sampleElapsedMs(
+  sampleTime: number,
+  options: AggregationOptions,
+): number {
+  if (
+    options.profileStartTime !== undefined &&
+    sampleTime >= options.profileStartTime
+  ) {
+    return sampleTime - options.profileStartTime;
+  }
+  return sampleTime;
+}
+
 // Collect resolved stack traces from a thread
-function collectStacks(thread: Thread, ctx?: SymbolContext): string[][] {
+function collectStacks(
+  thread: Thread,
+  ctx?: SymbolContext,
+  options: AggregationOptions = {},
+): { stacks: string[][]; totalSamples: number } {
   const allStacks: string[][] = [];
+  let totalSamples = 0;
   for (let i = 0; i < thread.samples.length; i++) {
+    const sampleTime = thread.samples.time[i];
+    if (
+      options.ignoreBeforeMs !== undefined &&
+      sampleElapsedMs(sampleTime, options) < options.ignoreBeforeMs
+    ) {
+      continue;
+    }
+    totalSamples++;
+
     const stackIdx = thread.samples.stack[i];
     if (stackIdx === null || stackIdx === undefined) continue;
     const stack = walkStack(thread, stackIdx, ctx);
     if (stack.length > 0) allStacks.push(stack);
   }
-  return allStacks;
+  return { stacks: allStacks, totalSamples };
 }
 
 // Aggregate pre-collected stacks into a result
@@ -239,11 +271,11 @@ function aggregateStacks(
 export function aggregateThread(
   thread: Thread,
   ctx?: SymbolContext,
+  options: AggregationOptions = {},
 ): AggregationResult {
-  const allStacks = collectStacks(thread, ctx);
-  const totalSamples = thread.samples.length;
+  const { stacks, totalSamples } = collectStacks(thread, ctx, options);
   const interval = 1; // Could get from profile.meta.interval
-  return aggregateStacks(allStacks, totalSamples, interval);
+  return aggregateStacks(stacks, totalSamples, interval);
 }
 
 function buildCallTree(
@@ -294,8 +326,11 @@ function buildCallTree(
 
   // Calculate percentages recursively
   function calcPercents(node: CallTreeNode) {
-    node.selfPercent = (node.selfTime / (totalSamples * interval)) * 100;
-    node.totalPercent = (node.totalTime / (totalSamples * interval)) * 100;
+    const totalTime = totalSamples * interval;
+    node.selfPercent = totalTime === 0 ? 0 : (node.selfTime / totalTime) * 100;
+    node.totalPercent = totalTime === 0
+      ? 0
+      : (node.totalTime / totalTime) * 100;
     // Sort children by total time descending
     node.children.sort((a, b) => b.totalTime - a.totalTime);
     for (const child of node.children) {
@@ -332,6 +367,7 @@ export function mergeThreads(
   threads: Thread[],
   symbolLookup: Map<string, Map<number, string>>,
   libs: Profile["libs"],
+  options: AggregationOptions = {},
 ): AggregationResult {
   let allStacks: string[][] = [];
   let totalSamples = 0;
@@ -343,15 +379,18 @@ export function mergeThreads(
       resourceTable: thread.resourceTable,
       stringArray: thread.stringArray,
     };
-    const stacks = collectStacks(thread, ctx);
-    allStacks = allStacks.concat(stacks);
-    totalSamples += thread.samples.length;
+    const collected = collectStacks(thread, ctx, options);
+    allStacks = allStacks.concat(collected.stacks);
+    totalSamples += collected.totalSamples;
   }
 
   return aggregateStacks(allStacks, totalSamples, 1);
 }
 
-export function aggregateProfile(parsed: ParsedProfile): AggregationResult[] {
+export function aggregateProfile(
+  parsed: ParsedProfile,
+  options: AggregationOptions = {},
+): AggregationResult[] {
   const symbolLookup = parsed.symbols
     ? buildSymbolLookup(parsed.symbols, parsed.profile.libs)
     : new Map();
@@ -369,7 +408,7 @@ export function aggregateProfile(parsed: ParsedProfile): AggregationResult[] {
       stringArray: thread.stringArray,
     };
 
-    const result = aggregateThread(thread, ctx);
+    const result = aggregateThread(thread, ctx, options);
     results.push({
       ...result,
       // Add thread info to the result

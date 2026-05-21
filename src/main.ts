@@ -31,6 +31,7 @@ OPTIONS:
   --min-percent <n>       Min percentage to show (default: 0.1)
   --rate <hz>             Sampling rate in Hz (default: 1000)
   --duration <sec>        Max recording duration in seconds
+  --ignore-before <time>  Ignore samples before this elapsed time (e.g. 250ms, 1s)
   --main-thread-only      Only profile main thread
   -p, --pid <PID>         Attach to an existing process by PID
   --load <file>           Load existing profile.json instead of recording
@@ -55,6 +56,9 @@ EXAMPLES:
 
   # Profile with custom settings
   flamey --rate 100 --duration 30 -- python script.py
+
+  # Ignore startup warmup samples
+  flamey --ignore-before 250ms -- ./my-program
 
   # Attach to a running process
   flamey --pid 12345
@@ -227,6 +231,31 @@ async function recordProfile(
   return profilePath;
 }
 
+function parseDurationMs(
+  value: unknown,
+  optionName: string,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "number") {
+    if (Number.isFinite(value) && value >= 0) return value;
+    throw new Error(`Invalid ${optionName} value: ${value}`);
+  }
+  if (typeof value !== "string") {
+    throw new Error(`Invalid ${optionName} value: ${value}`);
+  }
+
+  const match = value.trim().match(/^(\d+(?:\.\d+)?)(ms|s)?$/);
+  if (!match) {
+    throw new Error(
+      `Invalid ${optionName} value: ${value} (expected e.g. 250ms or 1s)`,
+    );
+  }
+
+  const amount = Number.parseFloat(match[1]);
+  const unit = match[2] ?? "ms";
+  return unit === "s" ? amount * 1000 : amount;
+}
+
 async function main() {
   const args = parseArgs(Deno.args, {
     boolean: [
@@ -236,7 +265,15 @@ async function main() {
       "forward-sigint",
       "merge-threads",
     ],
-    string: ["output", "format", "load", "thread", "exclude-thread", "pid"],
+    string: [
+      "output",
+      "format",
+      "load",
+      "thread",
+      "exclude-thread",
+      "pid",
+      "ignore-before",
+    ],
     collect: ["thread", "exclude-thread"],
     alias: {
       h: "help",
@@ -265,6 +302,11 @@ async function main() {
     console.log(`flamey v${VERSION}`);
     Deno.exit(0);
   }
+
+  const ignoreBeforeMs = parseDurationMs(
+    args["ignore-before"],
+    "--ignore-before",
+  );
 
   let profilePath: string;
 
@@ -318,7 +360,11 @@ async function main() {
 
   // Aggregate data
   console.error("Aggregating profile data...");
-  const results = aggregateProfile(parsed);
+  const aggregationOptions = {
+    ignoreBeforeMs,
+    profileStartTime: parsed.profile.meta.startTime,
+  };
+  const results = aggregateProfile(parsed, aggregationOptions);
 
   // Format output
   const formatOptions: FormatOptions = {
@@ -347,8 +393,9 @@ async function main() {
   }[] = [];
   for (let i = 0; i < threadsWithSamples.length; i++) {
     const t = threadsWithSamples[i];
+    const result = results[i];
 
-    if (t.samples.length < minSamples) continue;
+    if (result.totalSamples < minSamples) continue;
 
     if (threadPatterns.length > 0) {
       const matches = threadPatterns.some((p) => t.name.includes(p));
@@ -360,7 +407,7 @@ async function main() {
       if (excluded) continue;
     }
 
-    filteredPairs.push({ thread: t, result: results[i] });
+    filteredPairs.push({ thread: t, result });
   }
 
   if (filteredPairs.length === 0) {
@@ -394,7 +441,12 @@ async function main() {
     if (shouldMerge && group.length > 1) {
       // Merge all threads in this group into one combined result
       const threads = group.map((p) => p.thread);
-      const merged = mergeThreads(threads, symbolLookup, parsed.profile.libs);
+      const merged = mergeThreads(
+        threads,
+        symbolLookup,
+        parsed.profile.libs,
+        aggregationOptions,
+      );
       const first = group[0].thread;
       finalThreadInfos.push({
         name: `${name} (${group.length} threads merged)`,
@@ -405,7 +457,7 @@ async function main() {
       finalResults.push(merged);
     } else if (maxThreads !== undefined && group.length > maxThreads) {
       // Sort by sample count descending, keep top N
-      group.sort((a, b) => b.thread.samples.length - a.thread.samples.length);
+      group.sort((a, b) => b.result.totalSamples - a.result.totalSamples);
       const kept = group.slice(0, maxThreads);
       const dropped = group.length - maxThreads;
       console.error(

@@ -1,10 +1,14 @@
 # flamey
 
-LLM-friendly profiling output. Wraps [samply](https://github.com/mstange/samply) and aggregates the profile into text (or markdown/JSON) that an LLM can actually reason about — top functions by self-time, hot call paths, and frequent stack traces — without needing to interpret a flamegraph visually.
+LLM-friendly profiling output. Wraps [samply](https://github.com/mstange/samply)
+and aggregates the profile into text (or markdown/JSON) that an LLM can actually
+reason about — top functions by self-time, hot call paths, and frequent stack
+traces — without needing to interpret a flamegraph visually.
 
 ## Install
 
-Requires [Deno](https://deno.com) and [samply](https://github.com/mstange/samply) on `PATH`.
+Requires [Deno](https://deno.com) and
+[samply](https://github.com/mstange/samply) on `PATH`.
 
 ```sh
 deno task install
@@ -38,9 +42,20 @@ Write markdown to a file:
 flamey -f markdown -o profile.md -- cargo build
 ```
 
-Press `Ctrl+C` once to stop recording and process the profile, twice (within 1 second) to abort.
+Ignore startup warmup samples:
 
-See `flamey --help` for the full set of options, including thread filtering (`--thread`, `--exclude-thread`, `--merge-threads`, `--max-threads`), sampling rate, duration, and output tuning (`--top-functions`, `--max-depth`, `--min-percent`).
+```sh
+flamey --ignore-before 250ms -- ./my-program
+flamey --ignore-before 1s --load profile.json
+```
+
+Press `Ctrl+C` once to stop recording and process the profile, twice (within 1
+second) to abort.
+
+See `flamey --help` for the full set of options, including thread filtering
+(`--thread`, `--exclude-thread`, `--merge-threads`, `--max-threads`), sampling
+rate, duration, startup cutoff (`--ignore-before`), and output tuning
+(`--top-functions`, `--max-depth`, `--min-percent`).
 
 ## Output formats
 

@@ -395,9 +395,6 @@ export function formatAllResults(
     const result = results[i];
     const thread = threads[i];
 
-    // Skip threads with very few samples
-    if (result.totalSamples < 5) continue;
-
     outputs.push(formatResult(result, thread, options));
   }
 
