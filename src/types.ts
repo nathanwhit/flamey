@@ -84,7 +84,8 @@ export interface Samples {
   length: number;
   weightType: string;
   stack: (number | null)[]; // indices into stackTable
-  time: number[];
+  time?: number[];
+  timeDeltas?: number[];
   weight: number[] | null;
   threadCPUDelta?: (number | null)[];
 }

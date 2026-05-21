@@ -203,6 +203,26 @@ async function recordProfile(
 
   Deno.addSignalListener("SIGINT", sigintHandler);
 
+  // samply's --duration stops profiling but does not stop the profiled
+  // process. When we spawned the command ourselves, enforce the duration by
+  // signalling the child process tree once the time is up so samply can
+  // finalize the profile.
+  let durationTimer: ReturnType<typeof setTimeout> | undefined;
+  if (options.duration && "command" in target) {
+    durationTimer = setTimeout(() => {
+      console.error(
+        `\nDuration of ${options.duration}s elapsed, stopping profiled process...`,
+      );
+      try {
+        new Deno.Command("pkill", {
+          args: ["-INT", "-P", `${proc.pid}`],
+        }).outputSync();
+      } catch {
+        // Process may have already exited
+      }
+    }, options.duration * 1000);
+  }
+
   try {
     const status = await proc.status;
 
@@ -212,6 +232,7 @@ async function recordProfile(
       throw new Error(`samply exited with code ${status.code}`);
     }
   } finally {
+    if (durationTimer !== undefined) clearTimeout(durationTimer);
     Deno.removeSignalListener("SIGINT", sigintHandler);
   }
 

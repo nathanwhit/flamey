@@ -186,13 +186,20 @@ function collectStacks(
 ): { stacks: string[][]; totalSamples: number } {
   const allStacks: string[][] = [];
   let totalSamples = 0;
+  const times = thread.samples.time;
+  let cumulativeDelta = 0;
   for (let i = 0; i < thread.samples.length; i++) {
-    const sampleTime = thread.samples.time[i];
-    if (
-      options.ignoreBeforeMs !== undefined &&
-      sampleElapsedMs(sampleTime, options) < options.ignoreBeforeMs
-    ) {
-      continue;
+    if (options.ignoreBeforeMs !== undefined) {
+      let elapsedMs: number;
+      if (times) {
+        elapsedMs = sampleElapsedMs(times[i], options);
+      } else if (thread.samples.timeDeltas) {
+        cumulativeDelta += thread.samples.timeDeltas[i] ?? 0;
+        elapsedMs = cumulativeDelta;
+      } else {
+        elapsedMs = 0;
+      }
+      if (elapsedMs < options.ignoreBeforeMs) continue;
     }
     totalSamples++;
 
